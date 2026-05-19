@@ -4097,14 +4097,17 @@ class ContractWorkWindow(QDialog):
         self.original_entry_start_row = int(getattr(ci, "entry_start_row", 0) or 0)
         self.systems: List[SystemInfo] = systems or []
         self.deliveries: Dict[str, List[DeliveryInfo]] = deliveries or {}
-        self.contract_tags: List[dict] = self.store.load_contract_tags(
-            self.original_platform,
-            self.original_contract_no,
-            self.original_contract_type,
-        )
+        if isinstance(self.store, STSDatabase):
+            self.contract_tags: List[dict] = []
+        else:
+            self.contract_tags: List[dict] = self.store.load_contract_tags(
+                self.original_platform,
+                self.original_contract_no,
+                self.original_contract_type,
+            )
         dedup: Dict[str, dict] = {}
         for t in self.contract_tags:
-            k = self.store._normalize_label(str((t or {}).get("name") or ""))
+            k = (str((t or {}).get("name") or "").strip().casefold() if isinstance(self.store, STSDatabase) else self.store._normalize_label(str((t or {}).get("name") or "")))
             if not k:
                 continue
             dedup[k] = dict(t)
