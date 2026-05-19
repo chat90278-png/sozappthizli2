@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import re
 import traceback
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 from openpyxl import load_workbook
 
-from src.config.app_config import BASE_HEADERS, TAG_HEADERS, TAG_KIND_ASSIGN, TAG_SHEET, USERS_SHEET, COMP_SHEET
-from src.domain.constants import CORE_SHEETS, DATA_START_ROW
-from src.models.app_models import ContractInfo
-from src.workers.excel_workers import is_system_sheet_name, normalize_sheet_name, safe_sheet_name
+from src.config.app_config import COMP_SHEET, TAG_HEADERS, TAG_KIND_ASSIGN, TAG_SHEET, USERS_SHEET
+from src.workers.excel_workers import normalize_sheet_name, safe_sheet_name
+
+HEADER_ROW = 4
+SUBHEADER_ROW = 5
+DATA_START = 6
+FIRST_COMPONENT_COL = 15
 
 
 class FastExcelReader:
@@ -25,197 +28,152 @@ class FastExcelReader:
 
     def close_workbook(self):
         if self.wb is not None:
-            self.wb.close()
-            self.wb = None
+            self.wb.close(); self.wb = None
 
-    def _to_iso(self, v) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, datetime):
-            return v.date().isoformat()
-        if isinstance(v, date):
-            return v.isoformat()
-        s = str(v).strip()
-        return s
+    def _iso(self, v):
+        if isinstance(v, datetime): return v.date().isoformat()
+        if isinstance(v, date): return v.isoformat()
+        s = str(v or "").strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", s): return s
+        return "" if not s else s
 
-    def platform_names(self) -> list[str]:
-        wb = self.open_workbook()
-        excluded = {normalize_sheet_name(x) for x in CORE_SHEETS}
-        extra = {"anasayfa", "kullanicilar", "etiketler", "log", "config", "konfigurasyon", "logo", "logolar", "sistemtipleri", "bilesenler", "bilesen"}
-        out = []
+    def _num(self, v):
+        try: return float(v or 0)
+        except Exception: return 0.0
+
+    def platform_names(self):
+        wb=self.open_workbook(); out=[]
+        blocked={"anasayfa","kullanicilar","etiketler","sistem bilesenleri","platform logolari","log","config","sistemtipleri"}
         for ws in wb.worksheets:
-            title = str(ws.title or "")
-            n = normalize_sheet_name(title)
-            if getattr(ws, "sheet_state", "visible") != "visible":
-                continue
-            if title.startswith("_") or n.startswith("_"):
-                continue
-            if is_system_sheet_name(title):
-                continue
-            if n in excluded or n in extra:
-                continue
-            out.append(title)
+            if getattr(ws, "sheet_state", "visible") != "visible": continue
+            n=normalize_sheet_name(ws.title)
+            if ws.title.startswith("_") or n.startswith("_") or n in blocked: continue
+            out.append(ws.title)
         return out
 
-    def load_tags_map(self) -> dict:
-        wb = self.open_workbook()
-        out: Dict[Tuple[str, str, str], List[str]] = {}
-        tag_defs: List[dict] = []
-        if TAG_SHEET not in wb.sheetnames:
-            return {"tag_defs": tag_defs, "assignments": out}
-        ws = wb[TAG_SHEET]
-        for ridx, row_data in enumerate(ws.iter_rows(min_row=2, max_col=len(TAG_HEADERS), values_only=True), start=2):
+    def load_users(self):
+        wb=self.open_workbook();
+        if USERS_SHEET not in wb.sheetnames: return []
+        out=[]
+        for row in wb[USERS_SHEET].iter_rows(min_row=2, max_col=6, values_only=True):
+            name=str((row[0] if row else "") or "").strip()
+            if name: out.append({"name":name,"role":str((row[1] if len(row)>1 else "") or ""),"active":str((row[2] if len(row)>2 else True)).lower() not in {"0","false","pasif"},"payload_json":{"raw":list(row)}})
+        return out
+
+    def load_components(self):
+        wb=self.open_workbook();
+        if COMP_SHEET not in wb.sheetnames: return []
+        out=[]
+        for row in wb[COMP_SHEET].iter_rows(min_row=2, max_col=8, values_only=True):
+            name=str((row[0] if row else "") or "").strip()
+            if name: out.append({"name":name,"version":str((row[1] if len(row)>1 else "") or ""),"unit":str((row[2] if len(row)>2 else "Adet") or "Adet"),"usage":self._num(row[3] if len(row)>3 else 1),"active":str((row[4] if len(row)>4 else True)).lower() not in {"0","false","pasif"},"payload_json":{"raw":list(row)}})
+        return out
+
+    def load_tags_map(self):
+        wb=self.open_workbook(); defs=[]; assigns={}
+        if TAG_SHEET not in wb.sheetnames: return {"tag_defs":defs,"assignments":assigns}
+        for row in wb[TAG_SHEET].iter_rows(min_row=2, max_col=len(TAG_HEADERS), values_only=True):
             try:
-                kind = str((row_data[0] if len(row_data) > 0 else "") or "").strip().upper()
-                name = str((row_data[1] if len(row_data) > 1 else "") or "").strip()
-                color = str((row_data[3] if len(row_data) > 3 else "") or "").strip() or "#3B82F6"
-                platform = safe_sheet_name(str((row_data[5] if len(row_data) > 5 else "") or "").strip())
-                no = str((row_data[6] if len(row_data) > 6 else "") or "").strip()
-                ctype = str((row_data[7] if len(row_data) > 7 else "") or "").strip()
-                if name:
-                    tag_defs.append({"name": name, "color": color, "kind": kind or "MANUAL", "source_row": ridx})
-                if kind in {"ASSIGN", TAG_KIND_ASSIGN} and name and platform and no:
-                    out.setdefault((platform, no, ctype), []).append(name)
+                kind=str((row[0] if row else "") or "").upper().strip(); name=str((row[1] if len(row)>1 else "") or "").strip()
+                color=str((row[2] if len(row)>2 else "#3B82F6") or "#3B82F6")
+                p=safe_sheet_name(str((row[5] if len(row)>5 else "") or "").strip()); no=str((row[6] if len(row)>6 else "") or "").strip(); ctype=str((row[7] if len(row)>7 else "") or "").strip()
+                if name: defs.append({"name":name,"color":color,"kind":kind or "MANUAL"})
+                if kind in {"ASSIGN", TAG_KIND_ASSIGN} and p and no and name: assigns.setdefault((p,no,ctype), []).append(name)
             except Exception:
                 continue
-        return {"tag_defs": tag_defs, "assignments": out}
+        return {"tag_defs":defs,"assignments":assigns}
 
-    def load_users(self) -> list[dict]:
-        wb = self.open_workbook()
-        if USERS_SHEET not in wb.sheetnames:
-            return []
-        ws = wb[USERS_SHEET]
-        items = []
-        for row in ws.iter_rows(min_row=2, max_col=6, values_only=True):
-            name = str((row[0] if len(row) > 0 else "") or "").strip()
-            if not name:
-                continue
-            role = str((row[1] if len(row) > 1 else "") or "").strip()
-            active_raw = (row[2] if len(row) > 2 else True)
-            active = str(active_raw).strip().lower() not in {"0", "false", "hayir", "pasif"}
-            items.append({"name": name, "role": role, "active": active, "payload_json": {"raw": list(row)}})
-        return items
+    def _component_cols(self, ws):
+        cols=[]; c=FIRST_COMPONENT_COL; idx=1
+        while c <= ws.max_column:
+            nm=str(ws.cell(HEADER_ROW, c).value or "").strip(); sub1=normalize_sheet_name(str(ws.cell(SUBHEADER_ROW,c).value or ""))
+            if nm and "teslim" in sub1:
+                cols.append({"name":nm,"required_col":c,"delivered_col":c+1,"remaining_col":c+2,"sort_order":idx}); idx+=1; c+=3
+            else:
+                c+=1
+        return cols
 
-    def load_components(self) -> list[dict]:
-        wb = self.open_workbook()
-        if COMP_SHEET not in wb.sheetnames:
-            return []
-        ws = wb[COMP_SHEET]
-        items = []
-        for row in ws.iter_rows(min_row=2, max_col=8, values_only=True):
-            name = str((row[0] if len(row) > 0 else "") or "").strip()
-            if not name:
-                continue
-            version = str((row[1] if len(row) > 1 else "") or "").strip()
-            unit = str((row[2] if len(row) > 2 else "") or "").strip() or "Adet"
-            usage = float((row[3] if len(row) > 3 and row[3] is not None else 1) or 1)
-            active_raw = (row[4] if len(row) > 4 else True)
-            active = str(active_raw).strip().lower() not in {"0", "false", "hayir", "pasif"}
-            items.append({"name": name, "version": version, "unit": unit, "usage": usage, "active": active, "payload_json": {"raw": list(row)}})
-        return items
+    def _row_kind(self, e, f):
+        ne, nf = normalize_sheet_name(e), normalize_sheet_name(f)
+        if ne == "genel" and "ana sozlesme toplami" in nf: return "contract_total"
+        if "toplami" in nf: return "system_total"
+        if nf.startswith("kabul"): return "acceptance"
+        return "other"
 
-    def build_contract_index(self, progress_cb=None) -> list[dict]:
-        wb = self.open_workbook()
-        tags_map = self.load_tags_map().get("assignments", {})
-        platforms = self.platform_names()
-        rows = []
-        total = max(len(platforms), 1)
-        for i, platform in enumerate(platforms, start=1):
-            if progress_cb:
-                progress_cb(40 + int(i * 45 / total), f"{platform} aktarılıyor... ({i}/{total})")
-            ws = wb[platform]
-            p = safe_sheet_name(platform)
-            for ridx, row_data in enumerate(ws.iter_rows(min_row=DATA_START_ROW, max_col=len(BASE_HEADERS), values_only=True), start=DATA_START_ROW):
-                try:
-                    no = str((row_data[0] if len(row_data) > 0 else "") or "").strip()
-                    user = str((row_data[1] if len(row_data) > 1 else "") or "").strip()
-                    ctype = str((row_data[3] if len(row_data) > 3 else "") or "").strip()
-                    activity = str((row_data[4] if len(row_data) > 4 else "") or "").strip().upper()
-                    delivery = str((row_data[5] if len(row_data) > 5 else "") or "").strip().lower()
-                    content = str((row_data[6] if len(row_data) > 6 else "") or "").strip()
-                    completion = self._to_iso(row_data[10] if len(row_data) > 10 else "")
-                    status = str((row_data[11] if len(row_data) > 11 else "") or "").strip()
-                    if not no:
-                        continue
-                    if activity != "GENEL" or "ana sözleşme" not in delivery.replace("sozlesme", "sözleşme"):
-                        continue
-                    is_main = normalize_sheet_name(ctype) == normalize_sheet_name("Ana Sözleşme")
-                    tags = tags_map.get((p, no, ctype), [])
-                    item = {
-                        "platform": p, "no": no, "contract_no": no, "user": user, "user_name": user,
-                        "type": ctype, "contract_type": ctype, "type_display": ctype if is_main else f"↳ {ctype}",
-                        "link": "Ana Sözleşme" if is_main else "Ana sözleşmeye bağlı SD", "status": status,
-                        "completion_date": completion, "content": content, "row": ridx, "start_row": ridx,
-                        "is_main": is_main, "tags": tags,
-                    }
-                    item["search_text"] = " ".join(str(item.get(k, "") or "") for k in ["platform", "no", "user", "contract_type", "status", "completion_date", "content"]).lower()
-                    rows.append(item)
-                except Exception:
-                    continue
-        return rows
+    def _rows_for_platform(self, platform):
+        ws=self.open_workbook()[platform]; cols=self._component_cols(ws); out=[]
+        for r in range(DATA_START, ws.max_row+1):
+            vals=[ws.cell(r, c).value for c in range(1,15)]
+            no=str(vals[0] or "").strip(); f=str(vals[5] or "").strip(); e=str(vals[4] or "").strip()
+            if not no and not f and not e: continue
+            comps=[]
+            for cc in cols:
+                req=self._num(ws.cell(r,cc['required_col']).value); de=self._num(ws.cell(r,cc['delivered_col']).value); rem=self._num(ws.cell(r,cc['remaining_col']).value)
+                if req!=0 or de!=0 or rem!=0:
+                    comps.append({"name":cc['name'],"required":req,"delivered":de,"remaining":rem,"sort_order":cc['sort_order']})
+            out.append({"platform":safe_sheet_name(platform),"source_row":r,"contract_no":no,"user_name":str(vals[1] or ""),"domestic_foreign":str(vals[2] or ""),"contract_type":str(vals[3] or ""),"activity_name":str(vals[4] or ""),"delivery_acceptance_name":str(vals[5] or ""),"content":str(vals[6] or ""),"signed_date":self._iso(vals[7]),"t0_date":self._iso(vals[8]),"t0_months":int(self._num(vals[9])),"termin_date":self._iso(vals[10]),"status":str(vals[11] or ""),"acceptance_date":self._iso(vals[12]),"note":str(vals[13] or ""),"row_kind":self._row_kind(str(vals[4] or ""), str(vals[5] or "")),"components":comps})
+        return out
 
-    def load_contract_detail(self, platform: str, contract_no: str, start_row: int | None = None) -> tuple:
-        # TODO: read_only modda detay blok parse'i geliştirilir.
-        return None, [], {}
+    def build_contract_index(self, progress_cb=None):
+        out=[]
+        for p in self.platform_names():
+            for row in self._rows_for_platform(p):
+                if row['row_kind']!='contract_total' or not row['contract_no']: continue
+                out.append({"platform":row['platform'],"no":row['contract_no'],"contract_no":row['contract_no'],"user":row['user_name'],"user_name":row['user_name'],"type":row['contract_type'],"contract_type":row['contract_type'],"type_display":row['contract_type'],"link":"Ana Sözleşme","status":row['status'],"completion_date":row['termin_date'],"content":row['content'],"row":row['source_row'],"start_row":row['source_row'],"is_main":True,"tags":[],"search_text":" ".join([row['platform'],row['contract_no'],row['user_name'],row['contract_type'],row['status'],row['content']]).lower()})
+        return out
 
-    def import_to_sts(self, db, progress_cb=None) -> dict:
-        from datetime import datetime
-        report = {"platforms": 0, "users": 0, "components": 0, "tags": 0, "contracts": 0, "systems": 0, "deliveries": 0, "errors": []}
+    def load_contract_detail(self, platform, contract_no, start_row=None): return None, [], {}
+
+    def import_to_sts(self, db, progress_cb=None):
+        report={"platforms":0,"users":0,"components":0,"tags":0,"contracts":0,"contract_rows":0,"row_components":0,"errors":[]}
         try:
-            if progress_cb: progress_cb(5, "Excel açılıyor...")
-            self.open_workbook()
-            db.init_schema()
-            db.set_meta("imported_from_excel_path", str(self.excel_path))
-            db.set_meta("imported_at", datetime.utcnow().isoformat(timespec="seconds"))
-            db.set_meta("importer_version", "2.0-fast-import")
-            stat = self.excel_path.stat()
-            db.set_meta("source_excel_size", stat.st_size)
-            db.set_meta("source_excel_mtime", int(stat.st_mtime))
-
-            if progress_cb: progress_cb(12, "Platformlar okunuyor...")
-            platforms = self.platform_names()
-            for p in platforms:
-                db.upsert_platform(safe_sheet_name(p))
-            report["platforms"] = len(platforms)
-
-            if progress_cb: progress_cb(20, "Kullanıcılar aktarılıyor...")
-            users = self.load_users()
+            if progress_cb: progress_cb(5,"Excel açılıyor...")
+            self.open_workbook(); db.init_schema()
+            now=datetime.utcnow().isoformat(timespec="seconds")
+            db.set_meta("imported_from_excel_path", str(self.excel_path)); db.set_meta("imported_at", now); db.set_meta("importer_version","3.0")
+            st=self.excel_path.stat(); db.set_meta("source_excel_size", st.st_size); db.set_meta("source_excel_mtime", int(st.st_mtime))
+            if progress_cb: progress_cb(12,"Platformlar okunuyor...")
+            platforms=self.platform_names(); report['platforms']=len(platforms)
+            for p in platforms: db.upsert_platform(safe_sheet_name(p))
+            if progress_cb: progress_cb(20,"Kullanıcılar aktarılıyor...")
+            users=self.load_users();
             if users:
                 for u in users: db.upsert_user(u)
-            else:
-                db.upsert_user({"name": "Sistem", "role": "Varsayılan", "active": True})
-                users = [{"name": "Sistem"}]
-            report["users"] = len(users)
-
-            if progress_cb: progress_cb(28, "Bileşenler aktarılıyor...")
-            components = self.load_components()
-            for c in components: db.upsert_component(c)
-            report["components"] = len(components)
-
-            if progress_cb: progress_cb(34, "Etiketler aktarılıyor...")
-            tmap = self.load_tags_map()
-            tag_defs = tmap.get("tag_defs", [])
-            assignments = tmap.get("assignments", {})
-            for t in tag_defs: db.upsert_tag(t)
-            report["tags"] = len(tag_defs)
-
-            if progress_cb: progress_cb(40, "Sözleşmeler okunuyor...")
-            rows = self.build_contract_index(progress_cb=progress_cb)
-            for it in rows:
-                try:
-                    payload = dict(it)
-                    payload.update({"source_platform": it.get("platform"), "source_start_row": it.get("start_row"), "source_contract_no": it.get("no"), "source_imported_at": datetime.utcnow().isoformat(timespec="seconds")})
-                    it2 = dict(it); it2["payload_json"] = payload
-                    cid = db.upsert_contract_from_dict(it2)
-                    tags = list(it.get("tags") or assignments.get((it.get("platform"), it.get("no"), it.get("contract_type", "")), []))
-                    db.set_contract_tags(cid, tags)
-                    report["contracts"] += 1
-                except Exception as exc:
-                    report["errors"].append(f"contract:{it.get('platform')}/{it.get('no')} -> {exc}")
-
+            else: db.ensure_default_user(); users=[{"name":"Sistem"}]
+            report['users']=len(users)
+            if progress_cb: progress_cb(28,"Bileşenler aktarılıyor...")
+            comps=self.load_components(); report['components']=len(comps)
+            for c in comps: db.upsert_component(c)
+            if progress_cb: progress_cb(34,"Etiketler aktarılıyor...")
+            t=self.load_tags_map(); report['tags']=len(t['tag_defs'])
+            for tg in t['tag_defs']: db.upsert_tag(tg)
+            if progress_cb: progress_cb(40,"Sözleşmeler okunuyor...")
+            for i,p in enumerate(platforms, start=1):
+                if progress_cb: progress_cb(40+int(i*45/max(len(platforms),1)), f"{safe_sheet_name(p)} aktarılıyor... ({i}/{len(platforms)})")
+                rows=self._rows_for_platform(p)
+                block=[]; current_no=""
+                for rw in rows:
+                    no=rw.get('contract_no','').strip()
+                    if rw['row_kind']=='contract_total' and no:
+                        if block:
+                            h=next((x for x in block if x['row_kind']=='contract_total'), block[0])
+                            cid=db.upsert_contract_from_excel_block(h, block); db.set_contract_tags(cid, t['assignments'].get((h['platform'],h['contract_no'],h['contract_type']),[])); report['contracts']+=1
+                            report['contract_rows'] += len(block); report['row_components'] += sum(len(x.get('components') or []) for x in block)
+                        block=[rw]; current_no=no
+                    elif no and current_no and no!=current_no:
+                        h=next((x for x in block if x['row_kind']=='contract_total'), block[0])
+                        cid=db.upsert_contract_from_excel_block(h, block); db.set_contract_tags(cid, t['assignments'].get((h['platform'],h['contract_no'],h['contract_type']),[])); report['contracts']+=1
+                        report['contract_rows'] += len(block); report['row_components'] += sum(len(x.get('components') or []) for x in block)
+                        block=[rw]; current_no=no
+                    elif current_no:
+                        if not no: rw['contract_no']=current_no
+                        block.append(rw)
+                if block:
+                    h=next((x for x in block if x['row_kind']=='contract_total'), block[0])
+                    cid=db.upsert_contract_from_excel_block(h, block); db.set_contract_tags(cid, t['assignments'].get((h['platform'],h['contract_no'],h['contract_type']),[])); report['contracts']+=1
+                    report['contract_rows'] += len(block); report['row_components'] += sum(len(x.get('components') or []) for x in block)
             if progress_cb: progress_cb(94, "Veritabanı optimize ediliyor...")
-            db.add_log("excel_import_finished", "database", str(db.path), "Excel dosyası STS veritabanına aktarıldı", payload=report)
-            db.vacuum()
+            db.add_log("excel_import_finished","database",str(db.path),"Excel dosyası STS veritabanına aktarıldı",payload=report); db.vacuum()
             if progress_cb: progress_cb(100, "Aktarım tamamlandı.")
             return report
         except Exception as exc:

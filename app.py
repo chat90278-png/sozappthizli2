@@ -5983,7 +5983,10 @@ class MainWindow(QMainWindow):
                 self._remember_version_baseline()
         else:
             self.set_empty_state()
-            self.connection_label.setText("STS bağlı değil")
+            self.connection_label.setText("STS veri dosyası bağlı değil")
+
+    def is_sts_mode(self):
+        return getattr(self, "db", None) is not None
 
     def open_usage_guide(self):
         try:
@@ -6186,7 +6189,7 @@ class MainWindow(QMainWindow):
             self.connection_label.setText("Excel analiz ediliyor")
             self.connection_label.setProperty("status", "loading")
         else:
-            self.connection_label.setText("STS bağlı değil")
+            self.connection_label.setText("STS veri dosyası bağlı değil")
             self.connection_label.setProperty("status", "bad")
         st = self.connection_label.style()
         st.unpolish(self.connection_label)
@@ -6952,6 +6955,8 @@ class MainWindow(QMainWindow):
             self.db.init_schema()
             self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True}) if not self.db.list_users() else None
             self.db.add_log("database_opened", "database", str(path), "STS veritabanı açıldı")
+            self.update_connection_badge("ok")
+            self.connection_label.setText("STS veri dosyası bağlı")
             self.refresh()
         finally:
             self.set_busy_overlay(False)
@@ -7061,8 +7066,8 @@ class MainWindow(QMainWindow):
                 self.db.add_log("platform_created", "platform", pname)
                 self.refresh()
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg = PlatformManagerDialog(self.store, self)
         saved_via_signal = False
@@ -7089,8 +7094,8 @@ class MainWindow(QMainWindow):
             if ok and str(name).strip():
                 self.db.upsert_user({"name": str(name).strip(), "yi_yd": "Yİ", "active": True})
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg=UserManagerDialog(self.store,self)
         if dlg.exec():
@@ -7102,8 +7107,8 @@ class MainWindow(QMainWindow):
             if ok and str(name).strip():
                 self.db.upsert_tag({"name": str(name).strip(), "color": "#3B82F6"})
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg = TagManagerDialog(self.store, self.contract_index, self)
         dlg.exec()
@@ -7121,8 +7126,8 @@ class MainWindow(QMainWindow):
             if ok and str(name).strip():
                 self.db.upsert_component({"name": str(name).strip(), "unit": "Adet", "active": True, "usage": 1})
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg=ComponentManagerDialog(self.store,self)
         if dlg.exec():
@@ -7133,8 +7138,8 @@ class MainWindow(QMainWindow):
         if self.db:
             QMessageBox.information(self, "Bilgi", "Takvim görünümü bu fazda yalnızca Excel akışıyla kullanılabilir.")
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         self.set_busy_overlay(True, "Takvim hazırlanıyor...")
         try:
@@ -7170,8 +7175,8 @@ class MainWindow(QMainWindow):
                 if work.exec():
                     self.refresh()
             return
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         if not self.store.load_users():
             QMessageBox.information(self, "Kullanıcı gerekli", "Sözleşme girmeden önce kullanıcı tanımlayın.")
