@@ -8,6 +8,7 @@ class STSStoreAdapter:
     def __init__(self, db):
         self.db = db
         self.path = db.path
+        self.wb = None
 
     def platform_names(self): return self.db.list_platforms()
     def load_users(self): return self.db.list_users()
@@ -29,7 +30,11 @@ class STSStoreAdapter:
     def load_contract_structure(self, platform, contract_no, start_row=None):
         row = self.db.get_contract_by_key(platform, contract_no, "", start_row=start_row)
         if not row: return None, [], {}
-        return self.db.get_contract_detail(int(row.get("id") or 0))
+        cid = int(row.get("id") or 0)
+        ci, systems, deliveries = self.db.get_contract_detail(cid)
+        if ci is not None:
+            setattr(ci, "contract_id", cid)
+        return ci, systems, deliveries
     def write_contract(self, ci, systems, deliveries, old_contract_no=None, old_start_row=None):
         return self.db.upsert_contract(ci, systems, deliveries, old_contract_id=(int(old_start_row or 0) or None))
     def delete_contract(self, platform, contract_no, start_row=None, actor=None, progress_cb=None):
