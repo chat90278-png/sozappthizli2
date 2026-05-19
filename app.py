@@ -712,7 +712,6 @@ class UserManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Kullanıcı Yönetimi", parent)
         self.store = store
-        self.db = db
         self.users = store.load_users(active_only=False)
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -943,7 +942,6 @@ class ComponentManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Bileşen Yönetimi", parent)
         self.store = store
-        self.db = db
         self.components = store.load_components()
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -1380,17 +1378,11 @@ class ComponentManagerDialog(StyledDialog):
 from src.ui.dialogs.platforms import PlatformManagerDialog, PlatformDialog
 
 class ContractDialog(StyledDialog):
-    def __init__(self, store=None, parent=None, db=None):
+    def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Yeni Sözleşme", parent)
         self.store = store
-        self.db = db
-        self.is_sts = self.db is not None
-        if self.db is None and store is not None and hasattr(store, "list_contracts") and hasattr(store, "upsert_contract"):
-            self.db = store
-            self.store = None
-            self.is_sts = True
-        self.user_records = self._load_users()
-        self.user_to_yi_yd = {u.get("name", ""): u.get("yi_yd", u.get("role", "Yİ")) for u in self.user_records}
+        self.user_records = store.load_users()
+        self.user_to_yi_yd = {u.get("name", ""): u.get("yi_yd", "Yİ") for u in self.user_records}
         self.result: Optional[ContractInfo] = None
         self._sd_verified_info: Optional[dict] = None
         self._sd_anchor_start_row: int = 0
@@ -1434,7 +1426,7 @@ class ContractDialog(StyledDialog):
         no_container_lay.addWidget(no_row)
         no_container_lay.addWidget(self.no_dup_warn)
 
-        self.platform = QComboBox(); self.platform.addItems(self._load_platform_names())
+        self.platform = QComboBox(); self.platform.addItems(self.store.platform_names())
         self.user = QComboBox(); self.user.addItems([u.get("name", "") for u in self.user_records])
         self.yi_yd = QLineEdit(); self.yi_yd.setReadOnly(True); self.yi_yd.setText("Yİ")
         self.ctype = QComboBox(); self.ctype.addItems(["Ana Sözleşme"])
@@ -1450,8 +1442,7 @@ class ContractDialog(StyledDialog):
         self.months.valueChanged.connect(self.update_completion_date)
         self.user.currentTextChanged.connect(self.update_user_yi_yd)
         self.ctype.currentTextChanged.connect(self.on_contract_type_changed)
-        if not self.is_sts:
-            self.verify_btn.clicked.connect(lambda: self.verify_sd_reference(show_message=False))
+        self.verify_btn.clicked.connect(lambda: self.verify_sd_reference(show_message=False))
         self.platform.currentTextChanged.connect(self.on_sd_ref_changed)
         self.no.textChanged.connect(self.on_sd_ref_changed)
         # Anlık duplikasyon kontrolü: no veya platform veya tip değişince tekrar kontrol
@@ -1509,26 +1500,6 @@ class ContractDialog(StyledDialog):
         row.addWidget(save)
         root.addLayout(row)
 
-
-    def _load_platform_names(self):
-        if self.is_sts:
-            return self.db.list_platforms()
-        return self.store.platform_names()
-
-    def _load_users(self):
-        if self.is_sts:
-            try:
-                self.db.ensure_default_user()
-            except Exception:
-                pass
-            return self.db.list_users()
-        return self.store.load_users()
-
-    def _load_components(self):
-        if self.is_sts:
-            return self.db.list_components()
-        return self.store.load_components()
-
     def is_sd_mode(self) -> bool:
         return self.ctype.currentText().strip() == "Sözleşme Değişikliği"
 
@@ -1539,7 +1510,7 @@ class ContractDialog(StyledDialog):
         self._sd_anchor_platform = ""
         self._sd_anchor_no = ""
         if self.is_sd_mode():
-            suggested = self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()) if self.store else "SD-1"
+            suggested = self.store.next_sd_code(self.platform.currentText(), self.no.text().strip())
             if not self.sd_code.text().strip():
                 self.sd_code.setText(suggested)
             self.sd_verify_hint.setText("Doğrulama bekleniyor.")
@@ -1556,7 +1527,7 @@ class ContractDialog(StyledDialog):
         if sd:
             self.no.setPlaceholderText("Mevcut kontrat no")
             if not self.sd_code.text().strip():
-                self.sd_code.setText(self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()) if self.store else "SD-1")
+                self.sd_code.setText(self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()))
             self.sd_verify_hint.setText("Doğrulama bekleniyor.")
             self.sd_verify_hint.setStyleSheet("color:#64748b; font-weight:700;")
             self.user.setEnabled(False)
@@ -2218,7 +2189,6 @@ class TagManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, contract_index: Optional[List[dict]] = None, parent=None):
         super().__init__("Etiket Yönetimi", parent)
         self.store = store
-        self.db = db
         self.contract_index = list(contract_index or [])
         self.changed = False
         self.tags: List[TagDef] = []
@@ -4115,7 +4085,6 @@ class ContractWorkWindow(QDialog):
     def __init__(self, store: ExcelStore, ci: ContractInfo, parent=None, systems: Optional[List[SystemInfo]] = None, deliveries: Optional[Dict[str, List[DeliveryInfo]]] = None):
         super().__init__(parent)
         self.store = store
-        self.db = db
         # Yeni sozlesme mi (systems/deliveries verilmemis) yoksa mevcut mu
         self.is_new_contract = (systems is None and deliveries is None)
         self.ci = ci
@@ -4125,17 +4094,14 @@ class ContractWorkWindow(QDialog):
         self.original_entry_start_row = int(getattr(ci, "entry_start_row", 0) or 0)
         self.systems: List[SystemInfo] = systems or []
         self.deliveries: Dict[str, List[DeliveryInfo]] = deliveries or {}
-        if isinstance(self.store, STSDatabase):
-            self.contract_tags: List[dict] = []
-        else:
-            self.contract_tags: List[dict] = self.store.load_contract_tags(
-                self.original_platform,
-                self.original_contract_no,
-                self.original_contract_type,
-            )
+        self.contract_tags: List[dict] = self.store.load_contract_tags(
+            self.original_platform,
+            self.original_contract_no,
+            self.original_contract_type,
+        )
         dedup: Dict[str, dict] = {}
         for t in self.contract_tags:
-            k = (str((t or {}).get("name") or "").strip().casefold() if isinstance(self.store, STSDatabase) else self.store._normalize_label(str((t or {}).get("name") or "")))
+            k = self.store._normalize_label(str((t or {}).get("name") or ""))
             if not k:
                 continue
             dedup[k] = dict(t)
@@ -4718,18 +4684,6 @@ class ContractWorkWindow(QDialog):
         QMessageBox.critical(self, "Hata", f"Excel işlemi sırasında hata:\n{message}")
 
     def delete_contract(self):
-        if isinstance(self.store, STSDatabase):
-            cid = int(getattr(self.ci, "entry_start_row", 0) or 0)
-            if cid <= 0:
-                row = self.store.get_contract_by_key(str(self.ci.platform or ""), str(self.ci.no or ""), str(self.ci.contract_type or ""))
-                cid = int((row or {}).get("id") or 0)
-            if cid <= 0:
-                QMessageBox.warning(self, "Eksik", "Silinecek sözleşme bulunamadı.")
-                return
-            self.store.delete_contract(cid)
-            self.store.add_log("contract_deleted", "contract", str(cid), "Sözleşme silindi")
-            self.accept()
-            return
         no = str(self.ci.no or "").strip()
         platform = str(self.ci.platform or "").strip()
         if not no or not platform:
@@ -5836,14 +5790,6 @@ class ContractWorkWindow(QDialog):
         super().reject()
 
     def save_all(self):
-        if isinstance(self.store, STSDatabase):
-            cid = int(getattr(self.ci, "entry_start_row", 0) or 0) or None
-            new_id = self.store.upsert_contract(self.ci, self.systems, self.deliveries, old_contract_id=cid)
-            self.ci.entry_start_row = int(new_id)
-            self.store.add_log("contract_updated" if cid else "contract_created", "contract", str(new_id), "Sözleşme kaydedildi")
-            self._is_dirty = False
-            self.accept()
-            return
         # Değişiklik yoksa kaydetme
         if not self._is_dirty and not self.is_new_contract:
             QMessageBox.information(
@@ -5946,8 +5892,6 @@ from src.ui.dialogs.contract_summary_popup import ContractSummaryPopup
 
 from src.ui.dialogs.workbook_start import WorkbookStartDialog
 from src.ui.contract import work_window_view as cw_view
-
-
 
 class ExcelImportWorker(QObject):
     progress = Signal(int, str)
