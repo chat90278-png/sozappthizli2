@@ -1379,12 +1379,17 @@ class ComponentManagerDialog(StyledDialog):
 from src.ui.dialogs.platforms import PlatformManagerDialog, PlatformDialog
 
 class ContractDialog(StyledDialog):
-    def __init__(self, store: ExcelStore, parent=None):
+    def __init__(self, store=None, parent=None, db=None):
         super().__init__("Yeni Sözleşme", parent)
         self.store = store
         self.db = db
-        self.user_records = store.load_users()
-        self.user_to_yi_yd = {u.get("name", ""): u.get("yi_yd", "Yİ") for u in self.user_records}
+        self.is_sts = self.db is not None
+        if self.db is None and store is not None and hasattr(store, "list_contracts") and hasattr(store, "upsert_contract"):
+            self.db = store
+            self.store = None
+            self.is_sts = True
+        self.user_records = self._load_users()
+        self.user_to_yi_yd = {u.get("name", ""): u.get("yi_yd", u.get("role", "Yİ")) for u in self.user_records}
         self.result: Optional[ContractInfo] = None
         self._sd_verified_info: Optional[dict] = None
         self._sd_anchor_start_row: int = 0
@@ -1428,7 +1433,7 @@ class ContractDialog(StyledDialog):
         no_container_lay.addWidget(no_row)
         no_container_lay.addWidget(self.no_dup_warn)
 
-        self.platform = QComboBox(); self.platform.addItems(self.store.platform_names())
+        self.platform = QComboBox(); self.platform.addItems(self._load_platform_names())
         self.user = QComboBox(); self.user.addItems([u.get("name", "") for u in self.user_records])
         self.yi_yd = QLineEdit(); self.yi_yd.setReadOnly(True); self.yi_yd.setText("Yİ")
         self.ctype = QComboBox(); self.ctype.addItems(["Ana Sözleşme"])
@@ -1444,7 +1449,8 @@ class ContractDialog(StyledDialog):
         self.months.valueChanged.connect(self.update_completion_date)
         self.user.currentTextChanged.connect(self.update_user_yi_yd)
         self.ctype.currentTextChanged.connect(self.on_contract_type_changed)
-        self.verify_btn.clicked.connect(lambda: self.verify_sd_reference(show_message=False))
+        if not self.is_sts:
+            self.verify_btn.clicked.connect(lambda: self.verify_sd_reference(show_message=False))
         self.platform.currentTextChanged.connect(self.on_sd_ref_changed)
         self.no.textChanged.connect(self.on_sd_ref_changed)
         # Anlık duplikasyon kontrolü: no veya platform veya tip değişince tekrar kontrol
@@ -1502,6 +1508,26 @@ class ContractDialog(StyledDialog):
         row.addWidget(save)
         root.addLayout(row)
 
+
+    def _load_platform_names(self):
+        if self.is_sts:
+            return self.db.list_platforms()
+        return self.store.platform_names()
+
+    def _load_users(self):
+        if self.is_sts:
+            try:
+                self.db.ensure_default_user()
+            except Exception:
+                pass
+            return self.db.list_users()
+        return self.store.load_users()
+
+    def _load_components(self):
+        if self.is_sts:
+            return self.db.list_components()
+        return self.store.load_components()
+
     def is_sd_mode(self) -> bool:
         return self.ctype.currentText().strip() == "Sözleşme Değişikliği"
 
@@ -1512,7 +1538,7 @@ class ContractDialog(StyledDialog):
         self._sd_anchor_platform = ""
         self._sd_anchor_no = ""
         if self.is_sd_mode():
-            suggested = self.store.next_sd_code(self.platform.currentText(), self.no.text().strip())
+            suggested = self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()) if self.store else "SD-1"
             if not self.sd_code.text().strip():
                 self.sd_code.setText(suggested)
             self.sd_verify_hint.setText("Doğrulama bekleniyor.")
@@ -1529,7 +1555,7 @@ class ContractDialog(StyledDialog):
         if sd:
             self.no.setPlaceholderText("Mevcut kontrat no")
             if not self.sd_code.text().strip():
-                self.sd_code.setText(self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()))
+                self.sd_code.setText(self.store.next_sd_code(self.platform.currentText(), self.no.text().strip()) if self.store else "SD-1")
             self.sd_verify_hint.setText("Doğrulama bekleniyor.")
             self.sd_verify_hint.setStyleSheet("color:#64748b; font-weight:700;")
             self.user.setEnabled(False)
@@ -6775,6 +6801,18 @@ class MainWindow(QMainWindow):
             self.calendar_window = None
 
     def request_refresh(self, select_platform: Optional[str] = None, scope: str = "all", platform: Optional[str] = None):
+        if self.is_sts_mode():
+            platforms = self.db.list_platforms()
+            self._set_platform_items(platforms)
+            self.contract_index = self.db.list_contracts()
+            self.update_alert_strip()
+            if select_platform:
+                self.select_platform(select_platform)
+            elif self.platform_list.count() and self.platform_list.currentRow() < 0:
+                self.platform_list.setCurrentRow(0)
+            else:
+                self.schedule_apply_contract_filter()
+            return
         if not self.store:
             self.set_empty_state()
             return
@@ -7166,32 +7204,37 @@ class MainWindow(QMainWindow):
         return bool(work.exec())
 
     def new_contract(self):
-        if self.db:
-            if not self.db.list_users():
-                self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True})
-            dlg=ContractDialog(self.store,self)
+        if self.is_sts_mode():
+            if not self.db:
+                QMessageBox.information(self, "STS gerekli", "Önce bir STS veri dosyası açın.")
+                return
+            try:
+                self.db.ensure_default_user()
+            except Exception:
+                pass
+            platforms = self.db.list_platforms()
+            if not platforms:
+                QMessageBox.information(self, "Platform gerekli", "Sözleşme eklemeden önce bir platform oluşturun.")
+                return
+            dlg = ContractDialog(None, self, db=self.db)
             if dlg.exec() and dlg.result:
-                work=ContractWorkWindow(self.db,dlg.result,self)
+                work = ContractWorkWindow(self.db, dlg.result, self)
                 if work.exec():
-                    self.refresh()
+                    self.request_refresh(select_platform=dlg.result.platform, scope="platform", platform=dlg.result.platform)
             return
-        if not self.store and not self.is_sts_mode():
-            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
+        if not self.store:
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce bir STS veri dosyası veya Excel dosyası bağlayın.")
             return
         if not self.store.load_users():
             QMessageBox.information(self, "Kullanıcı gerekli", "Sözleşme girmeden önce kullanıcı tanımlayın.")
             udlg = UserManagerDialog(self.store, self)
             if not udlg.exec() or not self.store.load_users():
                 return
-        dlg=ContractDialog(self.store,self)
+        dlg = ContractDialog(self.store, self)
         if dlg.exec() and dlg.result:
-            work=ContractWorkWindow(self.store,dlg.result,self)
+            work = ContractWorkWindow(self.store, dlg.result, self)
             if work.exec():
-                self.request_refresh(
-                    select_platform=dlg.result.platform,
-                    scope="platform",
-                    platform=dlg.result.platform,
-                )
+                self.request_refresh(select_platform=dlg.result.platform, scope="platform", platform=dlg.result.platform)
 
     def refresh(self, rebuild_index: bool = True):
         if self.db:
@@ -7226,6 +7269,13 @@ class MainWindow(QMainWindow):
                 return
 
     def load_platform_contracts(self, platform):
+        if self.is_sts_mode():
+            self.all_contract_rows = self.db.list_contracts(platform) if platform else []
+            self._prepare_contract_row_cache(self.all_contract_rows)
+            self._refresh_query_filters()
+            self.right_title.setText(f"{platform} - Sözleşmeler")
+            self.apply_contract_filter()
+            return
         if not platform: return
         self.all_contract_rows = [dict(it) for it in self.contract_index if str(it.get("platform", "")) == str(platform)]
         self._prepare_contract_row_cache(self.all_contract_rows)
@@ -7570,6 +7620,17 @@ class MainWindow(QMainWindow):
         self.position_query_logo_background()
 
     def open_contract_item(self, item: dict):
+        if self.is_sts_mode():
+            contract_id = int(item.get("id") or 0)
+            ci, systems, deliveries = self.db.get_contract_detail(contract_id)
+            if not ci:
+                QMessageBox.warning(self, "Bulunamadı", "Sözleşme detayları okunamadı.")
+                return
+            work = ContractWorkWindow(self.db, ci, self, systems=systems, deliveries=deliveries)
+            work.contract_id = contract_id
+            if work.exec():
+                self.request_refresh(select_platform=ci.platform, scope="platform", platform=ci.platform)
+            return
         if not self.store:
             if getattr(self, "_store_loading", False):
                 QMessageBox.information(
