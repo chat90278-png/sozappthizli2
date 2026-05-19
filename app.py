@@ -6419,16 +6419,6 @@ class MainWindow(QMainWindow):
         return result
 
     def _platform_logo_pixmap(self, platform: str, size: Optional[QSize] = None) -> Optional[QPixmap]:
-        if self.db:
-            cid = int(item.get("id") or item.get("row") or 0)
-            ci, systems, deliveries = self.db.get_contract_detail(cid)
-            if not ci:
-                QMessageBox.warning(self, "Bulunamadı", "Sözleşme detayları okunamadı.")
-                return
-            work = ContractWorkWindow(self.db, ci, self, systems=systems, deliveries=deliveries)
-            if work.exec():
-                self.refresh()
-            return
         if not self.store:
             return None
 
@@ -7122,9 +7112,9 @@ class MainWindow(QMainWindow):
             if not platforms:
                 QMessageBox.information(self, "Platform gerekli", "Sözleşme eklemeden önce bir platform oluşturun.")
                 return
-            dlg = ContractDialog(None, self, db=self.db)
+            dlg = ContractDialog(self.store, self)
             if dlg.exec() and dlg.result:
-                work = ContractWorkWindow(self.db, dlg.result, self)
+                work = ContractWorkWindow(self.store, dlg.result, self)
                 if work.exec():
                     self.request_refresh(select_platform=dlg.result.platform, scope="platform", platform=dlg.result.platform)
             return
@@ -7532,7 +7522,7 @@ class MainWindow(QMainWindow):
             if not ci:
                 QMessageBox.warning(self, "Bulunamadı", "Sözleşme detayları okunamadı.")
                 return
-            work = ContractWorkWindow(self.db, ci, self, systems=systems, deliveries=deliveries)
+            work = ContractWorkWindow(self.store, ci, self, systems=systems, deliveries=deliveries)
             work.contract_id = contract_id
             if work.exec():
                 self.request_refresh(select_platform=ci.platform, scope="platform", platform=ci.platform)
