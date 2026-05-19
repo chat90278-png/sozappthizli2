@@ -10,12 +10,12 @@ from src.ui.theme import STYLE
 
 
 class WorkbookStartDialog(QDialog):
-    """Uygulama açılışında Excel dosyasını seçtirir veya sürükle-bırak ile alır."""
+    """Uygulama açılışında STS veritabanı dosyası seçtirir veya sürükle-bırak ile alır."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_path: Optional[Path] = None
-        self.setWindowTitle("Excel Dosyası Bağla")
+        self.setWindowTitle("STS Veri Dosyası Aç")
         self.setModal(True)
         self.setAcceptDrops(True)
         self.resize(720, 360)
@@ -27,16 +27,16 @@ class WorkbookStartDialog(QDialog):
         root.setContentsMargins(22, 22, 22, 22)
         root.setSpacing(14)
 
-        title = QLabel("Excel dosyasını bağla")
+        title = QLabel("STS veri dosyasını aç")
         title.setObjectName("mainTitle")
         root.addWidget(title)
 
-        desc = QLabel("Mevcut sözleşme takip Excel dosyanızı buraya sürükleyip bırakın veya dosya seçin. Dosya seçildikten sonra platformlar, kullanıcılar, bileşenler ve ana sözleşmeler analiz edilir.")
+        desc = QLabel("Mevcut STS veritabanı dosyanızı seçin veya yeni bir .sts dosyası oluşturun.")
         desc.setWordWrap(True)
         desc.setObjectName("muted")
         root.addWidget(desc)
 
-        self.drop_box = QLabel("Excel dosyasını buraya sürükleyip bırak\n.xlsx / .xlsm")
+        self.drop_box = QLabel(".sts dosyasını buraya sürükleyip bırak")
         self.drop_box.setAlignment(Qt.AlignCenter)
         self.drop_box.setMinimumHeight(150)
         self.drop_box.setStyleSheet(
@@ -64,7 +64,7 @@ class WorkbookStartDialog(QDialog):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith((".xlsx", ".xlsm")):
+                if url.toLocalFile().lower().endswith((".sts",)):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -72,14 +72,14 @@ class WorkbookStartDialog(QDialog):
     def dropEvent(self, event):
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
-            if path.suffix.lower() in [".xlsx", ".xlsm"]:
+            if path.suffix.lower() in [".sts"]:
                 self.selected_path = path
                 self.accept()
                 return
-        QMessageBox.warning(self, "Dosya uygun değil", "Lütfen .xlsx veya .xlsm uzantılı bir Excel dosyası bırakın.")
+        QMessageBox.warning(self, "Dosya uygun değil", "Lütfen .sts uzantılı bir dosya bırakın.")
 
     def pick_file(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Excel dosyası seç", str(Path.cwd()), "Excel (*.xlsx *.xlsm)")
+        p, _ = QFileDialog.getOpenFileName(self, "STS dosyası seç", str(Path.cwd()), "STS (*.sts)")
         if p:
             self.selected_path = Path(p)
             self.accept()
