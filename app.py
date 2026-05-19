@@ -4703,6 +4703,15 @@ class ContractWorkWindow(QDialog):
         )
         if ans != QMessageBox.Yes:
             return
+        if self._is_sts_store():
+            try:
+                self.store.delete_contract(platform, no, start_row=self.original_entry_start_row if self.original_entry_start_row > 0 else 0)
+                QMessageBox.information(self, "Silindi", "Sözleşme STS veritabanından silindi.")
+                self.accept()
+                return
+            except Exception as exc:
+                QMessageBox.critical(self, "Hata", f"Sözleşme STS veritabanından silinemedi.\n\n{exc}")
+                return
         worker = ContractSaveWorker(
             self.store.path,
             "delete",
@@ -5789,6 +5798,14 @@ class ContractWorkWindow(QDialog):
                 return
         super().reject()
 
+    def _is_sts_store(self):
+        return (
+            self.store is not None
+            and hasattr(self.store, "db")
+            and hasattr(self.store, "write_contract")
+            and hasattr(self.store, "load_contract_structure")
+        )
+
     def save_all(self):
         # Değişiklik yoksa kaydetme
         if not self._is_dirty and not self.is_new_contract:
@@ -5847,6 +5864,22 @@ class ContractWorkWindow(QDialog):
             "actor": actor,
             "tags": [dict(t or {}) for t in self.contract_tags],
         }
+        if self._is_sts_store():
+            try:
+                new_row = self.store.write_contract(
+                    self.ci,
+                    self.systems,
+                    self.deliveries,
+                    old_contract_no=getattr(self, "old_contract_no", None),
+                    old_start_row=getattr(self, "original_entry_start_row", None),
+                )
+                self.store.save()
+                payload = {"action": "write", "start_row": int(new_row or 0)}
+                self.on_contract_save_finished(payload)
+                return
+            except Exception as exc:
+                QMessageBox.critical(self, "Kayıt hatası", f"Sözleşme STS veritabanına kaydedilemedi.\n\n{exc}")
+                return
         worker = ContractSaveWorker(
             self.store.path,
             "write",

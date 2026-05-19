@@ -388,6 +388,10 @@ class ContractSaveWorker(QObject):
         Mevcut bellekteki store'da wb yüklüyse doğrudan kullan.
         Yoksa yeni ExcelStore aç (yavaş yol — sadece ilk kayıtta).
         """
+        if self.path.suffix.lower() == ".sts":
+            if self._store is not None:
+                return self._store, False
+            raise RuntimeError("STS kayıt işlemi ExcelStore ile açılamaz; STSStoreAdapter gerekli.")
         s = self._store
         if s is not None and getattr(s, 'wb', None) is not None:
             return s, False  # (store, opened_new=False)
