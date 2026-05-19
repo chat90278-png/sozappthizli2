@@ -271,6 +271,9 @@ class ElidedLabel(QLabel):
 
 
 from src.services.excel_store import ExcelStore
+from src.services.sts_database import STSDatabase
+from src.services.excel_exporter import export_sts_to_excel
+from src.services.fast_excel_reader import FastExcelReader
 from src.workers import ExcelLoadWorker, ComponentSaveWorker, UserSaveWorker, ContractSaveWorker, AnalyzeDialog
 
 
@@ -4086,14 +4089,17 @@ class ContractWorkWindow(QDialog):
         self.original_entry_start_row = int(getattr(ci, "entry_start_row", 0) or 0)
         self.systems: List[SystemInfo] = systems or []
         self.deliveries: Dict[str, List[DeliveryInfo]] = deliveries or {}
-        self.contract_tags: List[dict] = self.store.load_contract_tags(
-            self.original_platform,
-            self.original_contract_no,
-            self.original_contract_type,
-        )
+        if isinstance(self.store, STSDatabase):
+            self.contract_tags: List[dict] = []
+        else:
+            self.contract_tags: List[dict] = self.store.load_contract_tags(
+                self.original_platform,
+                self.original_contract_no,
+                self.original_contract_type,
+            )
         dedup: Dict[str, dict] = {}
         for t in self.contract_tags:
-            k = self.store._normalize_label(str((t or {}).get("name") or ""))
+            k = (str((t or {}).get("name") or "").strip().casefold() if isinstance(self.store, STSDatabase) else self.store._normalize_label(str((t or {}).get("name") or "")))
             if not k:
                 continue
             dedup[k] = dict(t)
@@ -4676,6 +4682,18 @@ class ContractWorkWindow(QDialog):
         QMessageBox.critical(self, "Hata", f"Excel işlemi sırasında hata:\n{message}")
 
     def delete_contract(self):
+        if isinstance(self.store, STSDatabase):
+            cid = int(getattr(self.ci, "entry_start_row", 0) or 0)
+            if cid <= 0:
+                row = self.store.get_contract_by_key(str(self.ci.platform or ""), str(self.ci.no or ""), str(self.ci.contract_type or ""))
+                cid = int((row or {}).get("id") or 0)
+            if cid <= 0:
+                QMessageBox.warning(self, "Eksik", "Silinecek sözleşme bulunamadı.")
+                return
+            self.store.delete_contract(cid)
+            self.store.add_log("contract_deleted", "contract", str(cid), "Sözleşme silindi")
+            self.accept()
+            return
         no = str(self.ci.no or "").strip()
         platform = str(self.ci.platform or "").strip()
         if not no or not platform:
@@ -5782,6 +5800,14 @@ class ContractWorkWindow(QDialog):
         super().reject()
 
     def save_all(self):
+        if isinstance(self.store, STSDatabase):
+            cid = int(getattr(self.ci, "entry_start_row", 0) or 0) or None
+            new_id = self.store.upsert_contract(self.ci, self.systems, self.deliveries, old_contract_id=cid)
+            self.ci.entry_start_row = int(new_id)
+            self.store.add_log("contract_updated" if cid else "contract_created", "contract", str(new_id), "Sözleşme kaydedildi")
+            self._is_dirty = False
+            self.accept()
+            return
         # Değişiklik yoksa kaydetme
         if not self._is_dirty and not self.is_new_contract:
             QMessageBox.information(
@@ -5885,11 +5911,36 @@ from src.ui.dialogs.contract_summary_popup import ContractSummaryPopup
 from src.ui.dialogs.workbook_start import WorkbookStartDialog
 from src.ui.contract import work_window_view as cw_view
 
+
+
+class ExcelImportWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, excel_path: Path, output_sts_path: Path):
+        super().__init__()
+        self.excel_path = Path(excel_path)
+        self.output_sts_path = Path(output_sts_path)
+
+    def run(self):
+        import traceback
+        try:
+            db = STSDatabase(self.output_sts_path)
+            db.create_new()
+            reader = FastExcelReader(self.excel_path)
+            report = reader.import_to_sts(db, progress_cb=lambda p, m: self.progress.emit(int(p), str(m)))
+            db.close()
+            self.finished.emit(self.output_sts_path, report)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
 class MainWindow(QMainWindow):
-    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None):
+    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None, db: Optional[STSDatabase] = None):
         super().__init__()
         self.path = Path(initial_path) if initial_path else (store.path if store else Path(DEFAULT_FILE))
         self.store = store
+        self.db = db
         self.contract_index = contract_index if contract_index is not None else []
         self._tag_color_map_cache: Optional[Dict[str, str]] = None
         self._loading = False
@@ -5923,7 +5974,10 @@ class MainWindow(QMainWindow):
                 self._remember_version_baseline()
         else:
             self.set_empty_state()
-            self.connection_label.setText("Excel bağlı değil")
+            self.connection_label.setText("STS veri dosyası bağlı değil")
+
+    def is_sts_mode(self):
+        return getattr(self, "db", None) is not None
 
     def open_usage_guide(self):
         try:
@@ -5957,7 +6011,10 @@ class MainWindow(QMainWindow):
         self.top_actions_btn.setPopupMode(QToolButton.InstantPopup)
         self.top_actions_menu = QMenu(self.top_actions_btn)
         self.top_actions_menu.setObjectName("topActionsMenu")
-        self.top_actions_menu.addAction("Excel Dosyası Değiştir", self.open_file)
+        self.top_actions_menu.addAction("STS Dosyası Aç", self.open_file)
+        self.top_actions_menu.addAction("Yeni STS Dosyası", self.create_sts_file)
+        self.top_actions_menu.addAction("Excel'e Aktar", self.export_excel)
+        self.top_actions_menu.addAction("Eski Excel’i STS’ye Dönüştür", self.convert_excel_to_sts)
         self.top_actions_menu.addAction("Platform Yönetimi", self.manage_platforms)
         self.top_actions_menu.addSeparator()
         self.top_actions_menu.addAction("Kullanıcı Yönetimi", self.manage_users)
@@ -6123,7 +6180,7 @@ class MainWindow(QMainWindow):
             self.connection_label.setText("Excel analiz ediliyor")
             self.connection_label.setProperty("status", "loading")
         else:
-            self.connection_label.setText("Excel bağlı değil")
+            self.connection_label.setText("STS veri dosyası bağlı değil")
             self.connection_label.setProperty("status", "bad")
         st = self.connection_label.style()
         st.unpolish(self.connection_label)
@@ -6382,6 +6439,16 @@ class MainWindow(QMainWindow):
         return result
 
     def _platform_logo_pixmap(self, platform: str, size: Optional[QSize] = None) -> Optional[QPixmap]:
+        if self.db:
+            cid = int(item.get("id") or item.get("row") or 0)
+            ci, systems, deliveries = self.db.get_contract_detail(cid)
+            if not ci:
+                QMessageBox.warning(self, "Bulunamadı", "Sözleşme detayları okunamadı.")
+                return
+            work = ContractWorkWindow(self.db, ci, self, systems=systems, deliveries=deliveries)
+            if work.exec():
+                self.refresh()
+            return
         if not self.store:
             return None
 
@@ -6852,7 +6919,100 @@ class MainWindow(QMainWindow):
     def open_file(self):
         dlg = WorkbookStartDialog(self)
         if dlg.exec() and dlg.selected_path:
-            self.start_excel_load(dlg.selected_path)
+            if str(dlg.selected_path).lower().endswith(".sts"):
+                self.open_sts_database(dlg.selected_path)
+            else:
+                QMessageBox.information(self, "Bilgi", "Yeni mimaride Excel ana veri dosyası olarak kullanılmıyor. Lütfen .sts dosyası oluşturun veya açın. Excel içe aktarım sonraki fazda eklenecek.")
+
+
+    def create_sts_file(self):
+        p, _ = QFileDialog.getSaveFileName(self, "Yeni STS dosyası", str(Path.cwd() / "sozlesme_veritabani.sts"), "STS (*.sts)")
+        if not p:
+            return
+        path = Path(p)
+        if path.suffix.lower() != ".sts":
+            path = path.with_suffix(".sts")
+        db = STSDatabase(path)
+        db.create_new()
+        db.add_log("database_created", "database", str(path), "STS veritabanı oluşturuldu")
+        self.open_sts_database(path)
+
+    def open_sts_database(self, path: Path):
+        self.set_busy_overlay(True, "STS veri dosyası açılıyor...")
+        try:
+            self.path = Path(path)
+            self.db = STSDatabase(self.path)
+            self.db.connect()
+            self.db.init_schema()
+            self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True}) if not self.db.list_users() else None
+            self.db.add_log("database_opened", "database", str(path), "STS veritabanı açıldı")
+            self.update_connection_badge("ok")
+            self.connection_label.setText("STS veri dosyası bağlı")
+            self.refresh()
+        finally:
+            self.set_busy_overlay(False)
+
+    def convert_excel_to_sts(self):
+        excel_path, _ = QFileDialog.getOpenFileName(self, "Dönüştürülecek Excel Dosyasını Seç", str(Path.cwd()), "Excel (*.xlsx *.xlsm)")
+        if not excel_path:
+            return
+        sts_path, _ = QFileDialog.getSaveFileName(self, "Oluşturulacak STS Dosyasını Seç", str(Path.cwd() / "donusturulen_veri.sts"), "STS (*.sts)")
+        if not sts_path:
+            return
+        out = Path(sts_path)
+        if out.suffix.lower() != ".sts":
+            out = out.with_suffix(".sts")
+        if out.exists():
+            ans = QMessageBox.question(self, "Onay", "Seçilen .sts dosyası zaten var. Üzerine yazılsın mı?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+        self.set_busy_overlay(True, "Excel STS veri dosyasına aktarılıyor...", 0)
+        self._import_thread = QThread(self)
+        self._import_worker = ExcelImportWorker(Path(excel_path), out)
+        self._import_worker.moveToThread(self._import_thread)
+        self._import_thread.started.connect(self._import_worker.run)
+        self._import_worker.progress.connect(self.on_contract_save_progress)
+        self._import_worker.finished.connect(self.on_excel_import_finished)
+        self._import_worker.failed.connect(self.on_excel_import_failed)
+        self._import_worker.finished.connect(self._import_thread.quit)
+        self._import_worker.failed.connect(self._import_thread.quit)
+        self._import_thread.finished.connect(self._import_worker.deleteLater)
+        self._import_thread.finished.connect(self._import_thread.deleteLater)
+        self._import_thread.start()
+
+    def on_excel_import_finished(self, db_path, report):
+        self.set_busy_overlay(False)
+        msg = (
+            f"Aktarım tamamlandı.\n\n"
+            f"Platform: {report.get('platforms', 0)}\n"
+            f"Kullanıcı: {report.get('users', 0)}\n"
+            f"Bileşen: {report.get('components', 0)}\n"
+            f"Etiket: {report.get('tags', 0)}\n"
+            f"Sözleşme: {report.get('contracts', 0)}\n"
+            f"Hata: {len(report.get('errors', []))}"
+        )
+        QMessageBox.information(self, "Excel -> STS", msg)
+        self.open_sts_database(Path(db_path))
+
+    def on_excel_import_failed(self, error_text: str):
+        self.set_busy_overlay(False)
+        QMessageBox.critical(self, "Excel -> STS Hatası", error_text)
+
+    def export_excel(self):
+        if not self.db:
+            QMessageBox.information(self, "STS gerekli", "Önce bir .sts dosyası açın.")
+            return
+        p, _ = QFileDialog.getSaveFileName(self, "Excel'e aktar", str(Path.cwd() / "sozlesmeler.xlsx"), "Excel (*.xlsx)")
+        if not p:
+            return
+        try:
+            self.db.add_log("export_excel_started", "export", p)
+            export_sts_to_excel(self.db, Path(p), progress_cb=self.on_contract_save_progress)
+            self.db.add_log("export_excel_finished", "export", p)
+            QMessageBox.information(self, "Başarılı", "Excel aktarımı tamamlandı.")
+        except Exception as exc:
+            self.db.add_log("export_excel_failed", "export", p, str(exc))
+            QMessageBox.warning(self, "Hata", f"Excel aktarımı başarısız: {exc}")
 
     def show_contract_summary(self, row: int, item: dict):
         if not self.store:
@@ -6889,8 +7049,16 @@ class MainWindow(QMainWindow):
         self.show_contract_summary(row, rows[row])
 
     def manage_platforms(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Platform", "Yeni platform adı:")
+            if ok and str(name).strip():
+                pname = str(name).strip()
+                self.db.upsert_platform(pname)
+                self.db.add_log("platform_created", "platform", pname)
+                self.refresh()
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg = PlatformManagerDialog(self.store, self)
         saved_via_signal = False
@@ -6912,16 +7080,26 @@ class MainWindow(QMainWindow):
         self.manage_platforms()
 
     def manage_users(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Kullanıcı", "Kullanıcı adı:", text="Sistem")
+            if ok and str(name).strip():
+                self.db.upsert_user({"name": str(name).strip(), "yi_yd": "Yİ", "active": True})
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg=UserManagerDialog(self.store,self)
         if dlg.exec():
             self.request_refresh(scope="ui")
 
     def manage_tags(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Etiket", "Etiket adı:")
+            if ok and str(name).strip():
+                self.db.upsert_tag({"name": str(name).strip(), "color": "#3B82F6"})
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg = TagManagerDialog(self.store, self.contract_index, self)
         dlg.exec()
@@ -6934,8 +7112,13 @@ class MainWindow(QMainWindow):
             self.request_refresh(select_platform=current_platform, scope="tags")
 
     def manage_components(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Bileşen", "Bileşen adı:")
+            if ok and str(name).strip():
+                self.db.upsert_component({"name": str(name).strip(), "unit": "Adet", "active": True, "usage": 1})
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         dlg=ComponentManagerDialog(self.store,self)
         if dlg.exec():
@@ -6943,8 +7126,11 @@ class MainWindow(QMainWindow):
 
 
     def open_calendar_tracking(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            QMessageBox.information(self, "Bilgi", "Takvim görünümü bu fazda yalnızca Excel akışıyla kullanılabilir.")
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         self.set_busy_overlay(True, "Takvim hazırlanıyor...")
         try:
@@ -6971,8 +7157,17 @@ class MainWindow(QMainWindow):
         return bool(work.exec())
 
     def new_contract(self):
-        if not self.store:
-            QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
+        if self.db:
+            if not self.db.list_users():
+                self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True})
+            dlg=ContractDialog(self.store,self)
+            if dlg.exec() and dlg.result:
+                work=ContractWorkWindow(self.db,dlg.result,self)
+                if work.exec():
+                    self.refresh()
+            return
+        if not self.store and not self.is_sts_mode():
+            QMessageBox.information(self, "Veri dosyası gerekli", "Önce STS veri dosyası açın.")
             return
         if not self.store.load_users():
             QMessageBox.information(self, "Kullanıcı gerekli", "Sözleşme girmeden önce kullanıcı tanımlayın.")
@@ -6990,6 +7185,16 @@ class MainWindow(QMainWindow):
                 )
 
     def refresh(self, rebuild_index: bool = True):
+        if self.db:
+            self.contract_index = self.db.list_contracts()
+            platforms = self.db.list_platforms()
+            self._set_platform_items(platforms)
+            self.update_query_logo_background(None)
+            self.update_alert_strip()
+            self.refresh_open_calendar()
+            if self.platform_list.count():
+                self.platform_list.setCurrentRow(0)
+            return
         if not self.store:
             self.set_empty_state()
             return
