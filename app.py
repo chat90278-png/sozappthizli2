@@ -273,6 +273,7 @@ class ElidedLabel(QLabel):
 from src.services.excel_store import ExcelStore
 from src.services.sts_database import STSDatabase
 from src.services.excel_exporter import export_sts_to_excel
+from src.services.fast_excel_reader import FastExcelReader
 from src.workers import ExcelLoadWorker, ComponentSaveWorker, UserSaveWorker, ContractSaveWorker, AnalyzeDialog
 
 
@@ -5919,6 +5920,30 @@ from src.ui.dialogs.contract_summary_popup import ContractSummaryPopup
 from src.ui.dialogs.workbook_start import WorkbookStartDialog
 from src.ui.contract import work_window_view as cw_view
 
+
+
+class ExcelImportWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, excel_path: Path, output_sts_path: Path):
+        super().__init__()
+        self.excel_path = Path(excel_path)
+        self.output_sts_path = Path(output_sts_path)
+
+    def run(self):
+        import traceback
+        try:
+            db = STSDatabase(self.output_sts_path)
+            db.create_new()
+            reader = FastExcelReader(self.excel_path)
+            report = reader.import_to_sts(db, progress_cb=lambda p, m: self.progress.emit(int(p), str(m)))
+            db.close()
+            self.finished.emit(self.output_sts_path, report)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None, db: Optional[STSDatabase] = None):
         super().__init__()
@@ -5995,6 +6020,7 @@ class MainWindow(QMainWindow):
         self.top_actions_menu.addAction("STS Dosyası Aç", self.open_file)
         self.top_actions_menu.addAction("Yeni STS Dosyası", self.create_sts_file)
         self.top_actions_menu.addAction("Excel'e Aktar", self.export_excel)
+        self.top_actions_menu.addAction("Eski Excel’i STS’ye Dönüştür", self.convert_excel_to_sts)
         self.top_actions_menu.addAction("Platform Yönetimi", self.manage_platforms)
         self.top_actions_menu.addSeparator()
         self.top_actions_menu.addAction("Kullanıcı Yönetimi", self.manage_users)
@@ -6929,6 +6955,52 @@ class MainWindow(QMainWindow):
             self.refresh()
         finally:
             self.set_busy_overlay(False)
+
+    def convert_excel_to_sts(self):
+        excel_path, _ = QFileDialog.getOpenFileName(self, "Dönüştürülecek Excel Dosyasını Seç", str(Path.cwd()), "Excel (*.xlsx *.xlsm)")
+        if not excel_path:
+            return
+        sts_path, _ = QFileDialog.getSaveFileName(self, "Oluşturulacak STS Dosyasını Seç", str(Path.cwd() / "donusturulen_veri.sts"), "STS (*.sts)")
+        if not sts_path:
+            return
+        out = Path(sts_path)
+        if out.suffix.lower() != ".sts":
+            out = out.with_suffix(".sts")
+        if out.exists():
+            ans = QMessageBox.question(self, "Onay", "Seçilen .sts dosyası zaten var. Üzerine yazılsın mı?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+        self.set_busy_overlay(True, "Excel STS veri dosyasına aktarılıyor...", 0)
+        self._import_thread = QThread(self)
+        self._import_worker = ExcelImportWorker(Path(excel_path), out)
+        self._import_worker.moveToThread(self._import_thread)
+        self._import_thread.started.connect(self._import_worker.run)
+        self._import_worker.progress.connect(self.on_contract_save_progress)
+        self._import_worker.finished.connect(self.on_excel_import_finished)
+        self._import_worker.failed.connect(self.on_excel_import_failed)
+        self._import_worker.finished.connect(self._import_thread.quit)
+        self._import_worker.failed.connect(self._import_thread.quit)
+        self._import_thread.finished.connect(self._import_worker.deleteLater)
+        self._import_thread.finished.connect(self._import_thread.deleteLater)
+        self._import_thread.start()
+
+    def on_excel_import_finished(self, db_path, report):
+        self.set_busy_overlay(False)
+        msg = (
+            f"Aktarım tamamlandı.\n\n"
+            f"Platform: {report.get('platforms', 0)}\n"
+            f"Kullanıcı: {report.get('users', 0)}\n"
+            f"Bileşen: {report.get('components', 0)}\n"
+            f"Etiket: {report.get('tags', 0)}\n"
+            f"Sözleşme: {report.get('contracts', 0)}\n"
+            f"Hata: {len(report.get('errors', []))}"
+        )
+        QMessageBox.information(self, "Excel -> STS", msg)
+        self.open_sts_database(Path(db_path))
+
+    def on_excel_import_failed(self, error_text: str):
+        self.set_busy_overlay(False)
+        QMessageBox.critical(self, "Excel -> STS Hatası", error_text)
 
     def export_excel(self):
         if not self.db:

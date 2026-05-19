@@ -144,6 +144,56 @@ CREATE INDEX IF NOT EXISTS idx_logs_created_at ON activity_logs(created_at);
                 c.execute("INSERT INTO deliveries(contract_id,system_name,delivery_name,delivery_date,status,sort_order,payload_json) VALUES(?,?,?,?,?,?,?)", (cid, sys_name, getattr(d,'name',''), getattr(d,'acceptance_date',''), getattr(d,'status',''), i, json.dumps(asdict(d), ensure_ascii=False)))
         c.commit(); return int(cid)
 
+
+    def get_or_create_platform(self, name: str):
+        self.upsert_platform(name)
+        row = self.connect().execute("SELECT id FROM platforms WHERE name=?", (name,)).fetchone()
+        return int(row[0]) if row else None
+
+    def ensure_default_user(self):
+        users = self.list_users()
+        if not users:
+            self.upsert_user({"name": "Sistem", "role": "Varsayılan", "active": True})
+
+    def clear_all(self, clear_meta: bool = False):
+        c = self.connect()
+        for t in ["contract_tags", "deliveries", "systems", "contracts", "tags", "components", "users", "platforms", "activity_logs"]:
+            c.execute(f"DELETE FROM {t}")
+        if clear_meta:
+            c.execute("DELETE FROM meta")
+        c.commit()
+
+    def set_contract_tags(self, contract_id: int, tag_names: list[str]):
+        c = self.connect()
+        c.execute("DELETE FROM contract_tags WHERE contract_id=?", (contract_id,))
+        seen = set()
+        for t in tag_names or []:
+            nm = str(t or "").strip()
+            if not nm or nm.casefold() in seen:
+                continue
+            seen.add(nm.casefold())
+            c.execute("INSERT INTO contract_tags(contract_id, tag_name) VALUES(?,?)", (int(contract_id), nm))
+        c.commit()
+
+    def upsert_contract_from_dict(self, item: dict) -> int:
+        ci_payload = item.get("payload_json") if isinstance(item.get("payload_json"), dict) else dict(item)
+        c = self.connect()
+        now = self._now()
+        platform = str(item.get("platform") or "").strip()
+        no = str(item.get("no") or item.get("contract_no") or "").strip()
+        ctype = str(item.get("contract_type") or item.get("type") or "").strip()
+        row = c.execute("SELECT id FROM contracts WHERE platform=? AND contract_no=? AND contract_type=? ORDER BY id DESC LIMIT 1", (platform, no, ctype)).fetchone()
+        stext = str(item.get("search_text") or item.get("search") or "").lower()
+        args = (platform, no, str(item.get("user") or item.get("user_name") or ""), ctype, str(item.get("type_display") or ctype), str(item.get("link") or ""), str(item.get("status") or ""), str(item.get("completion_date") or ""), str(item.get("content") or ""), int(bool(item.get("is_main", True))), stext, json.dumps(ci_payload, ensure_ascii=False), now)
+        if row:
+            cid = int(row[0])
+            c.execute("UPDATE contracts SET platform=?, contract_no=?, user_name=?, contract_type=?, type_display=?, link_type=?, status=?, completion_date=?, content=?, is_main=?, search_text=?, payload_json=?, updated_at=? WHERE id=?", args + (cid,))
+        else:
+            cur = c.execute("INSERT INTO contracts(platform,contract_no,user_name,contract_type,type_display,link_type,status,completion_date,content,is_main,search_text,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args + (now,))
+            cid = int(cur.lastrowid)
+        c.commit()
+        return cid
+
     def delete_contract(self, contract_id: int):
         c=self.connect(); c.execute("DELETE FROM systems WHERE contract_id=?", (contract_id,)); c.execute("DELETE FROM deliveries WHERE contract_id=?", (contract_id,)); c.execute("DELETE FROM contracts WHERE id=?", (contract_id,)); c.commit()
     def add_log(self, action: str, entity_type: str, entity_key: str, message: str = "", payload: dict | None = None):
