@@ -711,6 +711,7 @@ class UserManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Kullanıcı Yönetimi", parent)
         self.store = store
+        self.db = db
         self.users = store.load_users(active_only=False)
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -941,6 +942,7 @@ class ComponentManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Bileşen Yönetimi", parent)
         self.store = store
+        self.db = db
         self.components = store.load_components()
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -1807,6 +1809,7 @@ class ContractEditDialog(StyledDialog):
     ):
         super().__init__(title_text, parent)
         self.store = store
+        self.db = db
         self.ci = ci
         self.title_text = title_text
         self.save_text = save_text
@@ -2123,6 +2126,7 @@ class TagAssignDialog(StyledDialog):
     def __init__(self, store: ExcelStore, already_assigned: Optional[List[dict]] = None, parent=None):
         super().__init__("Etiket Ekle", parent)
         self.store = store
+        self.db = db
         self.available_tags = store.load_tag_defs(active_only=True)
         self.already_keys = {
             self.store._normalize_label(str((t or {}).get("name") or ""))
@@ -2213,6 +2217,7 @@ class TagManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, contract_index: Optional[List[dict]] = None, parent=None):
         super().__init__("Etiket Yönetimi", parent)
         self.store = store
+        self.db = db
         self.contract_index = list(contract_index or [])
         self.changed = False
         self.tags: List[TagDef] = []
@@ -2652,6 +2657,7 @@ class SystemDialog(StyledDialog):
     ):
         super().__init__("Sistemi Düzenle" if edit_mode else "Sistem Ekle", parent)
         self.store = store
+        self.db = db
         self.platform = platform
         self.default_name = default_name
         self.existing_system = existing_system
@@ -3061,6 +3067,7 @@ class MultiSystemDialog(StyledDialog):
     ):
         super().__init__("Çoklu Sistem Ekle", parent)
         self.store = store
+        self.db = db
         self.platform = str(platform or "")
         self.contract_t0_date = str(contract_t0_date or "")
         self.existing_names = set(existing_names or [])
@@ -4107,6 +4114,7 @@ class ContractWorkWindow(QDialog):
     def __init__(self, store: ExcelStore, ci: ContractInfo, parent=None, systems: Optional[List[SystemInfo]] = None, deliveries: Optional[Dict[str, List[DeliveryInfo]]] = None):
         super().__init__(parent)
         self.store = store
+        self.db = db
         # Yeni sozlesme mi (systems/deliveries verilmemis) yoksa mevcut mu
         self.is_new_contract = (systems is None and deliveries is None)
         self.ci = ci
