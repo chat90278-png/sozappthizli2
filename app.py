@@ -271,6 +271,10 @@ class ElidedLabel(QLabel):
 
 
 from src.services.excel_store import ExcelStore
+from src.services.sts_database import STSDatabase
+from src.services.sts_store_adapter import STSStoreAdapter
+from src.services.excel_exporter import export_sts_to_excel
+from src.services.fast_excel_reader import FastExcelReader
 from src.workers import ExcelLoadWorker, ComponentSaveWorker, UserSaveWorker, ContractSaveWorker, AnalyzeDialog
 
 
@@ -5886,10 +5890,11 @@ from src.ui.dialogs.workbook_start import WorkbookStartDialog
 from src.ui.contract import work_window_view as cw_view
 
 class MainWindow(QMainWindow):
-    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None):
+    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None, db: Optional[STSDatabase] = None):
         super().__init__()
         self.path = Path(initial_path) if initial_path else (store.path if store else Path(DEFAULT_FILE))
         self.store = store
+        self.db = db
         self.contract_index = contract_index if contract_index is not None else []
         self._tag_color_map_cache: Optional[Dict[str, str]] = None
         self._loading = False
@@ -5957,7 +5962,10 @@ class MainWindow(QMainWindow):
         self.top_actions_btn.setPopupMode(QToolButton.InstantPopup)
         self.top_actions_menu = QMenu(self.top_actions_btn)
         self.top_actions_menu.setObjectName("topActionsMenu")
-        self.top_actions_menu.addAction("Excel Dosyası Değiştir", self.open_file)
+        self.top_actions_menu.addAction("STS Dosyası Aç", self.open_file)
+        self.top_actions_menu.addAction("Yeni STS Dosyası", self.create_sts_file)
+        self.top_actions_menu.addAction("Eski Excel’i STS’ye Dönüştür", self.convert_excel_to_sts)
+        self.top_actions_menu.addAction("Excel'e Aktar", self.export_excel)
         self.top_actions_menu.addAction("Platform Yönetimi", self.manage_platforms)
         self.top_actions_menu.addSeparator()
         self.top_actions_menu.addAction("Kullanıcı Yönetimi", self.manage_users)
@@ -6852,7 +6860,61 @@ class MainWindow(QMainWindow):
     def open_file(self):
         dlg = WorkbookStartDialog(self)
         if dlg.exec() and dlg.selected_path:
-            self.start_excel_load(dlg.selected_path)
+            if str(dlg.selected_path).lower().endswith(".sts"):
+                self.open_sts_database(dlg.selected_path)
+            else:
+                QMessageBox.information(self, "Bilgi", "Yeni mimaride Excel ana veri dosyası olarak kullanılmıyor. Lütfen .sts dosyası oluşturun veya açın. Excel içe aktarım sonraki fazda eklenecek.")
+
+
+    def create_sts_file(self):
+        p, _ = QFileDialog.getSaveFileName(self, "Yeni STS dosyası", str(Path.cwd() / "sozlesme_veritabani.sts"), "STS (*.sts)")
+        if not p:
+            return
+        path = Path(p)
+        if path.suffix.lower() != ".sts":
+            path = path.with_suffix(".sts")
+        db = STSDatabase(path)
+        db.create_new()
+        self.open_sts_database(path)
+
+    def open_sts_database(self, path: Path):
+        self.path = Path(path)
+        self.db = STSDatabase(self.path)
+        self.db.connect()
+        self.db.init_schema()
+        self.db.ensure_default_user()
+        self.store = STSStoreAdapter(self.db)
+        self.contract_index = self.store.build_contract_index()
+        self._set_platform_items(self.store.platform_names())
+        self.update_connection_badge("ok")
+        self.connection_label.setText("STS veri dosyası bağlı")
+        self.refresh(rebuild_index=False)
+
+    def convert_excel_to_sts(self):
+        excel_path, _ = QFileDialog.getOpenFileName(self, "Dönüştürülecek Excel Dosyasını Seç", str(Path.cwd()), "Excel (*.xlsx *.xlsm)")
+        if not excel_path:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(self, "Oluşturulacak STS Dosyasını Seç", str(Path.cwd() / "donusturulen.sts"), "STS (*.sts)")
+        if not out_path:
+            return
+        out = Path(out_path)
+        if out.suffix.lower() != ".sts":
+            out = out.with_suffix(".sts")
+        db = STSDatabase(out)
+        db.create_new()
+        rep = FastExcelReader(Path(excel_path)).import_to_sts(db)
+        db.close()
+        QMessageBox.information(self, "Aktarım", f"Aktarım tamamlandı. Sözleşme: {rep.get('contracts',0)}")
+        self.open_sts_database(out)
+
+    def export_excel(self):
+        if self.db:
+            p, _ = QFileDialog.getSaveFileName(self, "Excel'e aktar", str(Path.cwd() / "sozlesmeler.xlsx"), "Excel (*.xlsx)")
+            if not p:
+                return
+            export_sts_to_excel(self.db, Path(p), progress_cb=self.on_contract_save_progress)
+            QMessageBox.information(self, "Başarılı", "Excel aktarımı tamamlandı.")
+            return
 
     def show_contract_summary(self, row: int, item: dict):
         if not self.store:
