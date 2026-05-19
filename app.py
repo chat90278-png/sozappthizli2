@@ -271,6 +271,8 @@ class ElidedLabel(QLabel):
 
 
 from src.services.excel_store import ExcelStore
+from src.services.sts_database import STSDatabase
+from src.services.excel_exporter import export_sts_to_excel
 from src.workers import ExcelLoadWorker, ComponentSaveWorker, UserSaveWorker, ContractSaveWorker, AnalyzeDialog
 
 
@@ -708,6 +710,7 @@ class UserManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Kullanıcı Yönetimi", parent)
         self.store = store
+        self.db = db
         self.users = store.load_users(active_only=False)
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -938,6 +941,7 @@ class ComponentManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Bileşen Yönetimi", parent)
         self.store = store
+        self.db = db
         self.components = store.load_components()
         self.changed = False
         self._save_thread: Optional[QThread] = None
@@ -1377,6 +1381,7 @@ class ContractDialog(StyledDialog):
     def __init__(self, store: ExcelStore, parent=None):
         super().__init__("Yeni Sözleşme", parent)
         self.store = store
+        self.db = db
         self.user_records = store.load_users()
         self.user_to_yi_yd = {u.get("name", ""): u.get("yi_yd", "Yİ") for u in self.user_records}
         self.result: Optional[ContractInfo] = None
@@ -1777,6 +1782,7 @@ class ContractEditDialog(StyledDialog):
     ):
         super().__init__(title_text, parent)
         self.store = store
+        self.db = db
         self.ci = ci
         self.title_text = title_text
         self.save_text = save_text
@@ -2093,6 +2099,7 @@ class TagAssignDialog(StyledDialog):
     def __init__(self, store: ExcelStore, already_assigned: Optional[List[dict]] = None, parent=None):
         super().__init__("Etiket Ekle", parent)
         self.store = store
+        self.db = db
         self.available_tags = store.load_tag_defs(active_only=True)
         self.already_keys = {
             self.store._normalize_label(str((t or {}).get("name") or ""))
@@ -2183,6 +2190,7 @@ class TagManagerDialog(StyledDialog):
     def __init__(self, store: ExcelStore, contract_index: Optional[List[dict]] = None, parent=None):
         super().__init__("Etiket Yönetimi", parent)
         self.store = store
+        self.db = db
         self.contract_index = list(contract_index or [])
         self.changed = False
         self.tags: List[TagDef] = []
@@ -2622,6 +2630,7 @@ class SystemDialog(StyledDialog):
     ):
         super().__init__("Sistemi Düzenle" if edit_mode else "Sistem Ekle", parent)
         self.store = store
+        self.db = db
         self.platform = platform
         self.default_name = default_name
         self.existing_system = existing_system
@@ -3031,6 +3040,7 @@ class MultiSystemDialog(StyledDialog):
     ):
         super().__init__("Çoklu Sistem Ekle", parent)
         self.store = store
+        self.db = db
         self.platform = str(platform or "")
         self.contract_t0_date = str(contract_t0_date or "")
         self.existing_names = set(existing_names or [])
@@ -4077,6 +4087,7 @@ class ContractWorkWindow(QDialog):
     def __init__(self, store: ExcelStore, ci: ContractInfo, parent=None, systems: Optional[List[SystemInfo]] = None, deliveries: Optional[Dict[str, List[DeliveryInfo]]] = None):
         super().__init__(parent)
         self.store = store
+        self.db = db
         # Yeni sozlesme mi (systems/deliveries verilmemis) yoksa mevcut mu
         self.is_new_contract = (systems is None and deliveries is None)
         self.ci = ci
@@ -4676,6 +4687,18 @@ class ContractWorkWindow(QDialog):
         QMessageBox.critical(self, "Hata", f"Excel işlemi sırasında hata:\n{message}")
 
     def delete_contract(self):
+        if isinstance(self.store, STSDatabase):
+            cid = int(getattr(self.ci, "entry_start_row", 0) or 0)
+            if cid <= 0:
+                row = self.store.get_contract_by_key(str(self.ci.platform or ""), str(self.ci.no or ""), str(self.ci.contract_type or ""))
+                cid = int((row or {}).get("id") or 0)
+            if cid <= 0:
+                QMessageBox.warning(self, "Eksik", "Silinecek sözleşme bulunamadı.")
+                return
+            self.store.delete_contract(cid)
+            self.store.add_log("contract_deleted", "contract", str(cid), "Sözleşme silindi")
+            self.accept()
+            return
         no = str(self.ci.no or "").strip()
         platform = str(self.ci.platform or "").strip()
         if not no or not platform:
@@ -5782,6 +5805,14 @@ class ContractWorkWindow(QDialog):
         super().reject()
 
     def save_all(self):
+        if isinstance(self.store, STSDatabase):
+            cid = int(getattr(self.ci, "entry_start_row", 0) or 0) or None
+            new_id = self.store.upsert_contract(self.ci, self.systems, self.deliveries, old_contract_id=cid)
+            self.ci.entry_start_row = int(new_id)
+            self.store.add_log("contract_updated" if cid else "contract_created", "contract", str(new_id), "Sözleşme kaydedildi")
+            self._is_dirty = False
+            self.accept()
+            return
         # Değişiklik yoksa kaydetme
         if not self._is_dirty and not self.is_new_contract:
             QMessageBox.information(
@@ -5886,10 +5917,11 @@ from src.ui.dialogs.workbook_start import WorkbookStartDialog
 from src.ui.contract import work_window_view as cw_view
 
 class MainWindow(QMainWindow):
-    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None):
+    def __init__(self, store: Optional[ExcelStore] = None, contract_index: Optional[List[dict]] = None, initial_path: Optional[Path] = None, db: Optional[STSDatabase] = None):
         super().__init__()
         self.path = Path(initial_path) if initial_path else (store.path if store else Path(DEFAULT_FILE))
         self.store = store
+        self.db = db
         self.contract_index = contract_index if contract_index is not None else []
         self._tag_color_map_cache: Optional[Dict[str, str]] = None
         self._loading = False
@@ -5923,7 +5955,7 @@ class MainWindow(QMainWindow):
                 self._remember_version_baseline()
         else:
             self.set_empty_state()
-            self.connection_label.setText("Excel bağlı değil")
+            self.connection_label.setText("STS bağlı değil")
 
     def open_usage_guide(self):
         try:
@@ -5957,7 +5989,9 @@ class MainWindow(QMainWindow):
         self.top_actions_btn.setPopupMode(QToolButton.InstantPopup)
         self.top_actions_menu = QMenu(self.top_actions_btn)
         self.top_actions_menu.setObjectName("topActionsMenu")
-        self.top_actions_menu.addAction("Excel Dosyası Değiştir", self.open_file)
+        self.top_actions_menu.addAction("STS Dosyası Aç", self.open_file)
+        self.top_actions_menu.addAction("Yeni STS Dosyası", self.create_sts_file)
+        self.top_actions_menu.addAction("Excel'e Aktar", self.export_excel)
         self.top_actions_menu.addAction("Platform Yönetimi", self.manage_platforms)
         self.top_actions_menu.addSeparator()
         self.top_actions_menu.addAction("Kullanıcı Yönetimi", self.manage_users)
@@ -6123,7 +6157,7 @@ class MainWindow(QMainWindow):
             self.connection_label.setText("Excel analiz ediliyor")
             self.connection_label.setProperty("status", "loading")
         else:
-            self.connection_label.setText("Excel bağlı değil")
+            self.connection_label.setText("STS bağlı değil")
             self.connection_label.setProperty("status", "bad")
         st = self.connection_label.style()
         st.unpolish(self.connection_label)
@@ -6382,6 +6416,16 @@ class MainWindow(QMainWindow):
         return result
 
     def _platform_logo_pixmap(self, platform: str, size: Optional[QSize] = None) -> Optional[QPixmap]:
+        if self.db:
+            cid = int(item.get("id") or item.get("row") or 0)
+            ci, systems, deliveries = self.db.get_contract_detail(cid)
+            if not ci:
+                QMessageBox.warning(self, "Bulunamadı", "Sözleşme detayları okunamadı.")
+                return
+            work = ContractWorkWindow(self.db, ci, self, systems=systems, deliveries=deliveries)
+            if work.exec():
+                self.refresh()
+            return
         if not self.store:
             return None
 
@@ -6852,7 +6896,52 @@ class MainWindow(QMainWindow):
     def open_file(self):
         dlg = WorkbookStartDialog(self)
         if dlg.exec() and dlg.selected_path:
-            self.start_excel_load(dlg.selected_path)
+            if str(dlg.selected_path).lower().endswith(".sts"):
+                self.open_sts_database(dlg.selected_path)
+            else:
+                QMessageBox.information(self, "Bilgi", "Yeni mimaride Excel ana veri dosyası olarak kullanılmıyor. Lütfen .sts dosyası oluşturun veya açın. Excel içe aktarım sonraki fazda eklenecek.")
+
+
+    def create_sts_file(self):
+        p, _ = QFileDialog.getSaveFileName(self, "Yeni STS dosyası", str(Path.cwd() / "sozlesme_veritabani.sts"), "STS (*.sts)")
+        if not p:
+            return
+        path = Path(p)
+        if path.suffix.lower() != ".sts":
+            path = path.with_suffix(".sts")
+        db = STSDatabase(path)
+        db.create_new()
+        db.add_log("database_created", "database", str(path), "STS veritabanı oluşturuldu")
+        self.open_sts_database(path)
+
+    def open_sts_database(self, path: Path):
+        self.set_busy_overlay(True, "STS veri dosyası açılıyor...")
+        try:
+            self.path = Path(path)
+            self.db = STSDatabase(self.path)
+            self.db.connect()
+            self.db.init_schema()
+            self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True}) if not self.db.list_users() else None
+            self.db.add_log("database_opened", "database", str(path), "STS veritabanı açıldı")
+            self.refresh()
+        finally:
+            self.set_busy_overlay(False)
+
+    def export_excel(self):
+        if not self.db:
+            QMessageBox.information(self, "STS gerekli", "Önce bir .sts dosyası açın.")
+            return
+        p, _ = QFileDialog.getSaveFileName(self, "Excel'e aktar", str(Path.cwd() / "sozlesmeler.xlsx"), "Excel (*.xlsx)")
+        if not p:
+            return
+        try:
+            self.db.add_log("export_excel_started", "export", p)
+            export_sts_to_excel(self.db, Path(p), progress_cb=self.on_contract_save_progress)
+            self.db.add_log("export_excel_finished", "export", p)
+            QMessageBox.information(self, "Başarılı", "Excel aktarımı tamamlandı.")
+        except Exception as exc:
+            self.db.add_log("export_excel_failed", "export", p, str(exc))
+            QMessageBox.warning(self, "Hata", f"Excel aktarımı başarısız: {exc}")
 
     def show_contract_summary(self, row: int, item: dict):
         if not self.store:
@@ -6889,6 +6978,14 @@ class MainWindow(QMainWindow):
         self.show_contract_summary(row, rows[row])
 
     def manage_platforms(self):
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Platform", "Yeni platform adı:")
+            if ok and str(name).strip():
+                pname = str(name).strip()
+                self.db.upsert_platform(pname)
+                self.db.add_log("platform_created", "platform", pname)
+                self.refresh()
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6912,6 +7009,11 @@ class MainWindow(QMainWindow):
         self.manage_platforms()
 
     def manage_users(self):
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Kullanıcı", "Kullanıcı adı:", text="Sistem")
+            if ok and str(name).strip():
+                self.db.upsert_user({"name": str(name).strip(), "yi_yd": "Yİ", "active": True})
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6920,6 +7022,11 @@ class MainWindow(QMainWindow):
             self.request_refresh(scope="ui")
 
     def manage_tags(self):
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Etiket", "Etiket adı:")
+            if ok and str(name).strip():
+                self.db.upsert_tag({"name": str(name).strip(), "color": "#3B82F6"})
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6934,6 +7041,11 @@ class MainWindow(QMainWindow):
             self.request_refresh(select_platform=current_platform, scope="tags")
 
     def manage_components(self):
+        if self.db:
+            name, ok = QInputDialog.getText(self, "Bileşen", "Bileşen adı:")
+            if ok and str(name).strip():
+                self.db.upsert_component({"name": str(name).strip(), "unit": "Adet", "active": True, "usage": 1})
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6943,6 +7055,9 @@ class MainWindow(QMainWindow):
 
 
     def open_calendar_tracking(self):
+        if self.db:
+            QMessageBox.information(self, "Bilgi", "Takvim görünümü bu fazda yalnızca Excel akışıyla kullanılabilir.")
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6971,6 +7086,15 @@ class MainWindow(QMainWindow):
         return bool(work.exec())
 
     def new_contract(self):
+        if self.db:
+            if not self.db.list_users():
+                self.db.upsert_user({"name": "Sistem", "yi_yd": "Yİ", "active": True})
+            dlg=ContractDialog(self.store,self)
+            if dlg.exec() and dlg.result:
+                work=ContractWorkWindow(self.db,dlg.result,self)
+                if work.exec():
+                    self.refresh()
+            return
         if not self.store:
             QMessageBox.information(self, "Excel gerekli", "Önce bir Excel dosyası bağlayın.")
             return
@@ -6990,6 +7114,16 @@ class MainWindow(QMainWindow):
                 )
 
     def refresh(self, rebuild_index: bool = True):
+        if self.db:
+            self.contract_index = self.db.list_contracts()
+            platforms = self.db.list_platforms()
+            self._set_platform_items(platforms)
+            self.update_query_logo_background(None)
+            self.update_alert_strip()
+            self.refresh_open_calendar()
+            if self.platform_list.count():
+                self.platform_list.setCurrentRow(0)
+            return
         if not self.store:
             self.set_empty_state()
             return
