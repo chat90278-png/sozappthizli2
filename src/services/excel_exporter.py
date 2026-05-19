@@ -1,3 +1,5 @@
+"""Excel export çıktısı rapor amaçlıdır; legacy import formatıyla birebir uyum garantisi yoktur."""
+
 from __future__ import annotations
 
 from pathlib import Path
